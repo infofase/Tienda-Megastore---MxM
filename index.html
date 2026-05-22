@@ -730,29 +730,38 @@ function card(p, lv){
 }
 
 // ── Carga diferida de imágenes ──────────────────────
+// Cascada: 1) repo ./images/  2) Clearbit  3) logo.dev  4) Google favicon  5) emoji
 function loadImages(){
   document.querySelectorAll('img.prod-img:not([src])').forEach(img=>{
-    const safe=img.id.replace('pimg_','');
-    const prodImg=`./images/${safe}.jpg`;
-    const fif=document.getElementById('pif_'+safe);
+    const safe  = img.id.replace('pimg_','');
+    const fif   = document.getElementById('pif_'+safe);
+    const brand = (img.dataset.brand||'').trim();
+    const dom   = BRANDS[brand.toLowerCase()] || null;
 
-    // Intentar imagen del producto primero
-    const tryProd=new Image();
-    tryProd.onload=()=>{
-      img.src=prodImg; img.classList.add('loaded');
-      if(fif) fif.style.display='none';
-    };
-    tryProd.onerror=()=>{
-      // Fallback: logo de marca
-      const blogo=brandLogoUrl(img.dataset.brand);
-      if(blogo){
-        const tryBrand=new Image();
-        tryBrand.onload=()=>{img.src=blogo;img.classList.add('loaded');if(fif)fif.style.display='none';};
-        tryBrand.onerror=()=>{/* queda el fallback emoji */};
-        tryBrand.src=blogo;
-      }
-    };
-    tryProd.src=prodImg;
+    function show(src){
+      img.src = src; img.classList.add('loaded');
+      if(fif) fif.style.display = 'none';
+    }
+
+    // Fuentes en orden de preferencia
+    const sources = [
+      './images/'+safe+'.jpg',
+      './images/'+safe+'.png',
+      dom ? 'https://logo.clearbit.com/'+dom          : null,
+      dom ? 'https://img.logo.dev/'+dom+'?token=free' : null,
+      dom ? 'https://www.google.com/s2/favicons?domain='+dom+'&sz=128' : null,
+    ].filter(Boolean);
+
+    let idx = 0;
+    function tryNext(){
+      if(idx >= sources.length) return;      // queda emoji de categoría
+      const src = sources[idx++];
+      const t = new Image();
+      t.onload  = ()=>{ if(t.naturalWidth > 16) show(src); else tryNext(); };
+      t.onerror = tryNext;
+      t.src = src;
+    }
+    tryNext();
   });
 }
 
@@ -822,17 +831,26 @@ function openModal(cod){
         <span class="stb stt" style="display:inline-flex">✈ ${p._via} uds</span></span></div>`:''}
     </div>`;
 
-  // Cargar imagen en modal
-  const mImg=document.getElementById(`m_img_${safe}`);
-  const mPif=document.getElementById(`m_pif_${safe}`);
-  function tryImg(src, next){
+  // Cargar imagen en modal — misma cascada que en tarjetas
+  const mImg = document.getElementById('m_img_'+safe);
+  const mPif = document.getElementById('m_pif_'+safe);
+  const mDom = BRANDS[(p.marca||'').toLowerCase().trim()] || null;
+  const mSrcs = [
+    './images/'+safe+'.jpg',
+    './images/'+safe+'.png',
+    mDom ? 'https://logo.clearbit.com/'+mDom          : null,
+    mDom ? 'https://img.logo.dev/'+mDom+'?token=free' : null,
+    mDom ? 'https://www.google.com/s2/favicons?domain='+mDom+'&sz=128' : null,
+  ].filter(Boolean);
+  let mIdx=0;
+  (function mTryNext(){
+    if(mIdx>=mSrcs.length) return;
+    const src=mSrcs[mIdx++];
     const t=new Image();
-    t.onload=()=>{mImg.src=src;mImg.style.display='block';if(mPif)mPif.style.display='none';};
-    t.onerror=next||function(){};
+    t.onload=()=>{ if(t.naturalWidth>16){ mImg.src=src; mImg.style.display='block'; if(mPif)mPif.style.display='none'; } else mTryNext(); };
+    t.onerror=mTryNext;
     t.src=src;
-  }
-  const blogo=brandLogoUrl(p.marca);
-  tryImg(`./images/${safe}.jpg`, blogo ? ()=>tryImg(blogo) : null);
+  })();
 
   document.getElementById('mo').classList.add('on');
 }

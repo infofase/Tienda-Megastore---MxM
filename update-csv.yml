@@ -1,0 +1,227 @@
+name: Actualizar CSV e imágenes
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+    - cron: '30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── 1. CSV ──────────────────────────────────────
+      - name: Descargar CSV
+        run: |
+          curl -fsSL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+            "https://infofase.com/tienda/megastore.csv" -o megastore.csv
+          echo "Líneas: $(wc -l < megastore.csv)"
+
+      # ── 2. Imágenes ─────────────────────────────────
+      - name: Instalar Python deps
+        run: pip install requests --quiet
+
+      - name: Descargar imágenes de productos
+        run: |
+          python3 << 'PYEOF'
+          import csv, requests, os, re, time, json, random
+
+          os.makedirs('images', exist_ok=True)
+
+          # ── Leer CSV ──────────────────────────────────
+          with open('megastore.csv', encoding='latin-1', errors='replace') as f:
+              raw = f.read()
+
+          lines = raw.strip().split('\n')
+          sep   = ';' if ';' in lines[0] else ','
+          heads = [h.strip().strip('"').lower() for h in lines[0].split(sep)]
+
+          def col(row, name, default=''):
+              try: return row[heads.index(name)].strip().strip('"')
+              except: return default
+
+          products = []
+          for line in lines[1:]:
+              parts = line.split(sep)
+              if len(parts) < 2: continue
+              cod   = col(parts, 'codigo')
+              marca = col(parts, 'marca')
+              desc  = col(parts, 'denominacion')
+              if cod and desc:
+                  products.append((cod, marca, desc))
+
+          print(f"Productos en CSV: {len(products)}")
+
+          # ── Helpers ───────────────────────────────────
+          HDR = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                            'AppleWebKit/537.36 (KHTML, like Gecko) '
+                            'Chrome/121.0.0.0 Safari/537.36',
+              'Accept-Language': 'es-ES,es;q=0.9',
+          }
+
+          def safe_name(s):
+              return re.sub(r'[/\\?%*:|"<>\s]', '_', s)
+
+          def download_img(url, path):
+              """Descarga url → path. Devuelve True si ok."""
+              try:
+                  r = requests.get(url, headers=HDR, timeout=10,
+                                   allow_redirects=True, stream=True)
+                  ct = r.headers.get('content-type', '')
+                  if r.status_code == 200 and 'image' in ct:
+                      data = r.content
+                      if len(data) > 1000:          # descartar ficheros vacíos/error
+                          with open(path, 'wb') as f:
+                              f.write(data)
+                          return True
+              except Exception:
+                  pass
+              return False
+
+          # ── Intentar imagen en megastore.es ───────────
+          MS_SESSION = requests.Session()
+          MS_SESSION.headers.update(HDR)
+          try:
+              MS_SESSION.get('https://www.megastore.es/', timeout=8)
+          except Exception:
+              pass
+
+          def try_megastore(codigo):
+              patterns = [
+                  f'https://www.megastore.es/images/productos/{codigo}.jpg',
+                  f'https://www.megastore.es/images/productos/{codigo.lower()}.jpg',
+                  f'https://www.megastore.es/images/art/{codigo}.jpg',
+                  f'https://www.megastore.es/images/{codigo}.jpg',
+                  f'https://www.megastore.es/fotos/{codigo}.jpg',
+                  f'https://www.megastore.es/images/productos/{codigo}.png',
+              ]
+              for url in patterns:
+                  try:
+                      r = MS_SESSION.get(url, timeout=6, allow_redirects=True)
+                      ct = r.headers.get('content-type','')
+                      if r.status_code == 200 and 'image' in ct and len(r.content) > 1000:
+                          return r.content
+                  except Exception:
+                      pass
+              return None
+
+          # ── Buscar en DuckDuckGo Images ───────────────
+          DDG = requests.Session()
+          DDG.headers.update(HDR)
+          _vqd_cache = {}
+
+          def get_vqd(query):
+              if query in _vqd_cache:
+                  return _vqd_cache[query]
+              try:
+                  r = DDG.get('https://duckduckgo.com/',
+                              params={'q': query, 'ia': 'images'},
+                              timeout=10)
+                  m = re.search(r'vqd=([\d-]+)', r.text)
+                  if m:
+                      _vqd_cache[query] = m.group(1)
+                      return m.group(1)
+              except Exception:
+                  pass
+              return None
+
+          def ddg_first_image(query):
+              """Devuelve URL de la primera imagen de DuckDuckGo para la query."""
+              vqd = get_vqd(query)
+              if not vqd:
+                  return None
+              try:
+                  r = DDG.get('https://duckduckgo.com/i.js',
+                              params={
+                                  'l': 'es-es', 'o': 'json',
+                                  'q': query, 'vqd': vqd,
+                                  'f': ',,,', 'p': '1',
+                              },
+                              headers={**HDR, 'Referer': 'https://duckduckgo.com/'},
+                              timeout=12)
+                  data = r.json()
+                  results = data.get('results', [])
+                  for res in results[:5]:                  # los primeros 5
+                      url = res.get('thumbnail') or res.get('image','')
+                      if url and url.startswith('http'):
+                          return url
+              except Exception:
+                  pass
+              return None
+
+          # ── Bucle principal ───────────────────────────
+          MAX_NEW   = 300   # imágenes nuevas máx por ejecución
+          new_count = 0
+          skip      = 0
+
+          for i, (cod, marca, desc) in enumerate(products):
+              safe = safe_name(cod)
+              path = f'images/{safe}.jpg'
+
+              if os.path.exists(path) and os.path.getsize(path) > 500:
+                  skip += 1
+                  continue
+
+              if new_count >= MAX_NEW:
+                  print(f"Límite de {MAX_NEW} imágenes nuevas alcanzado. El resto se descargará en la siguiente ejecución.")
+                  break
+
+              saved = False
+
+              # 1) Probar megastore.es
+              data = try_megastore(cod)
+              if data:
+                  with open(path, 'wb') as f:
+                      f.write(data)
+                  saved = True
+
+              # 2) Buscar en DuckDuckGo
+              if not saved:
+                  # Construir query específica (marca + modelo corto)
+                  short_desc = ' '.join(desc.split()[:6])
+                  query = f'{marca} {short_desc}' if marca else short_desc
+                  img_url = ddg_first_image(query)
+                  if img_url:
+                      saved = download_img(img_url, path)
+
+              # 3) Buscar con solo marca + tipo de producto (query más genérica)
+              if not saved and marca:
+                  words = [w for w in desc.lower().split()
+                           if len(w) > 3 and w not in ('para','con','de','la','el','los','las')]
+                  generic = f'{marca} {" ".join(words[:3])}'
+                  img_url = ddg_first_image(generic)
+                  if img_url:
+                      saved = download_img(img_url, path)
+
+              if saved:
+                  new_count += 1
+
+              if (i+1) % 50 == 0:
+                  print(f"  [{i+1}/{len(products)}] nuevas={new_count} omitidas={skip}")
+
+              time.sleep(0.3 + random.uniform(0, 0.2))  # pausa respetuosa
+
+          print(f"\n✅ Imágenes: {new_count} nuevas descargadas, {skip} ya existían")
+          PYEOF
+
+      # ── 3. Commit ────────────────────────────────────
+      - name: Publicar cambios
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add megastore.csv images/
+          if git diff --staged --quiet; then
+            echo "Sin cambios."
+          else
+            N=$(git diff --staged --name-only | grep '^images/' | wc -l | tr -d ' ')
+            git commit -m "⬆️ Sync $(date '+%Y-%m-%d %H:%M UTC') · ${N} imágenes"
+            git push
+          fi
