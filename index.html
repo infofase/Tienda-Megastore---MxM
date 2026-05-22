@@ -207,6 +207,28 @@ aside{
 
 footer{background:var(--bd);color:rgba(255,255,255,.55);text-align:center;padding:16px;font-size:12px;margin-top:14px}
 footer strong{color:#fff}
+
+/* ── FILTER PANEL ─────────────────────────────────────── */
+.flt-panel{margin-top:12px;background:var(--w);border:1px solid var(--g200);border-radius:13px;overflow:hidden;box-shadow:var(--sh)}
+.flt-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--g100)}
+.flt-head-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--g400)}
+.flt-clear{font-size:11px;color:var(--blue);background:none;border:none;cursor:pointer;font-family:inherit;font-weight:600;padding:0;display:none}
+.flt-clear.show{display:block}
+.flt-group{border-bottom:1px solid var(--g100)}
+.flt-group:last-child{border-bottom:none}
+.flt-group-btn{display:flex;align-items:center;justify-content:space-between;width:100%;padding:8px 12px;border:none;background:none;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:600;color:var(--g700);text-align:left}
+.flt-group-btn:hover{background:var(--g50)}
+.flt-group-btn .fchev{font-size:10px;color:var(--g400);transition:.2s}
+.flt-group-btn.open .fchev{transform:rotate(90deg)}
+.flt-items{display:none;padding:4px 12px 8px}
+.flt-items.show{display:block}
+.flt-item{display:flex;align-items:center;gap:7px;padding:3px 0;cursor:pointer;font-size:12.5px;color:var(--g700)}
+.flt-item:hover{color:var(--blue)}
+.flt-item input[type=checkbox]{width:13px;height:13px;accent-color:var(--blue);cursor:pointer;flex-shrink:0}
+.flt-item.active{color:var(--blue);font-weight:600}
+.flt-cnt{margin-left:auto;font-size:10.5px;color:var(--g400)}
+.flt-item.active .flt-cnt{color:var(--blue)}
+
 </style>
 </head>
 <body>
@@ -244,6 +266,15 @@ footer strong{color:#fff}
 <div class="layout">
   <aside>
     <div class="sh2">Categorías</div>
+
+    <!-- Filter panel — aparece al seleccionar categoría -->
+    <div class="flt-panel" id="fltPanel" style="display:none">
+      <div class="flt-head">
+        <span class="flt-head-lbl">Filtros</span>
+        <button class="flt-clear" id="fltClear">Limpiar filtros</button>
+      </div>
+      <div id="fltBody"></div>
+    </div>
     <!-- Event delegation: todos los clicks se manejan en JS, sin onclick inline -->
     <div class="cat-tree" id="catTree">
       <div style="padding:18px;text-align:center;color:var(--g400);font-size:13px">Cargando…</div>
@@ -437,14 +468,15 @@ function detectCat(p){
 }
 
 // ════════════════════════════════════════════════════
-//  SEARCH — multi-palabra, cualquier orden, con score
+//  SEARCH — multi-palabra, prioridad por relevancia
 //
-//  Score por producto:
-//   +40  por cada término que aparece en el nombre
-//   +20  por cada término que aparece en marca/referencia
-//   +5   por cada término que aparece en categoría/tipo
-//   +bonus si todos los términos coinciden (resultado "exacto")
-//   Resultados parciales (solo algún término): score menor
+//  Tier 1 (millones): frase exacta en el nombre
+//  Tier 2 (100.000): todos los términos en el nombre
+//  Tier 3 (10.000×n): n términos en el nombre
+//  Tier 4 (1.000×n): n términos en marca/referencia
+//  Tier 5 (100×n):  n términos en categoría
+//  Score 0 → excluido
+//  Desempate: nombre más corto primero (match más preciso)
 // ════════════════════════════════════════════════════
 function norm(s){
   return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -460,28 +492,484 @@ function scoreSearch(p, terms){
   const ref   = norm(p.codigo||'');
   const brand = norm(p.marca||'');
   const cat   = norm((p._cat||'')+' '+(p._sub||''));
+  const phrase = terms.join(' ');          // frase completa de búsqueda
 
-  let score = 0;
-  let fullMatches = 0;   // términos que aparecen en el campo principal (nombre)
-
+  // Contar coincidencias por campo
+  let inName=0, inBrandRef=0, inCat=0;
   for(const t of terms){
-    let hit = false;
-    if(name.includes(t))  { score += 40; hit = true; fullMatches++; }
-    if(ref.includes(t))   { score += 20; hit = true; }
-    if(brand.includes(t)) { score += 20; hit = true; }
-    if(cat.includes(t))   { score +=  5; hit = true; }
-    // Coincidencia parcial: la palabra empieza con el término o contiene el término
-    if(!hit){
-      // Permite encontrar "toner" buscando "ton"
-      if(name.includes(t.slice(0,-1)) || brand.includes(t.slice(0,-1))) score += 5;
-    }
+    if(name.includes(t))            inName++;
+    else if(ref.includes(t) || brand.includes(t)) inBrandRef++;
+    else if(cat.includes(t))        inCat++;
+    // Si no hay ni una coincidencia del término en ningún campo → no se cuenta
   }
 
-  // Bonus si todos los términos están en el nombre → aparece primero
-  if(fullMatches === terms.length) score += 100;
+  const anyMatch = inName + inBrandRef + inCat;
+  if(anyMatch === 0) return 0;   // ningún término coincide → excluir
+
+  let score = 0;
+
+  // Tier 1: frase exacta en el nombre (máxima prioridad)
+  // Penalizar por longitud del nombre para que "iPhone 17 Pro" salga
+  // antes que "iPhone 17 Pro Max" cuando ambos contienen la frase
+  if(name.includes(phrase)){
+    score = 10000000 - name.length * 100;
+  }
+  // Tier 2: todos los términos están en el nombre (pero no como frase exacta)
+  else if(inName === terms.length){
+    score = 1000000 - name.length * 10;
+  }
+  // Tier 3: algunos términos en el nombre
+  else if(inName > 0){
+    score = 10000 * inName - name.length;
+  }
+  // Tier 4: coincidencias solo en marca o referencia
+  else if(inBrandRef > 0){
+    score = 1000 * inBrandRef;
+  }
+  // Tier 5: coincidencias solo en categoría
+  else {
+    score = 100 * inCat;
+  }
 
   return score;
 }
+
+
+// ════════════════════════════════════════════════════
+//  ATTRIBUTE EXTRACTION  (from product description)
+// ════════════════════════════════════════════════════
+function extractAttrs(p){
+  const d = (p.denominacion||'').toLowerCase();
+  const t = (p.producto||'').toLowerCase();
+  const m = (p.marca||'').toLowerCase();
+  const a = {};
+
+  // ── RAM ──────────────────────────────────────────
+  // "8gb ddr4" / "ram 8gb" / "8 gb ram"
+  let rm = d.match(/(?:^|\s)(\d+)\s*gb\s+(?:ram|ddr\d|lpddr\d?)/)||
+            d.match(/(?:ram|memoria)\s+(\d+)\s*gb/)||
+            d.match(/(\d+)\s*gb\s+ram/);
+  if(rm) a.ram = rm[1]+'GB';
+
+  // ── Almacenamiento ────────────────────────────────
+  // "256gb ssd" / "512gb nvme" / "1tb hdd" / "capacidad 128gb"
+  let st = d.match(/(\d+)\s*(tb)\s+(?:ssd|nvme|hdd|disco|emmc|flash)/)||
+            d.match(/(\d+)\s*(gb)\s+(?:ssd|nvme|hdd|emmc|flash|interno|storage)/)||
+            d.match(/capacidad\s+(\d+)(gb|tb)/);
+  if(st){
+    const unit=(st[2]&&st[2].toLowerCase()==='tb')?'TB':'GB';
+    a.almacenamiento = st[1]+unit;
+  }
+
+  // ── Pantalla (pulgadas) ───────────────────────────
+  let sc = d.match(/(\d+(?:[.,]\d+)?)\s*['\"´`'']/);
+  if(sc) a.pantalla = sc[1].replace(',','.')+'"';
+
+  // ── Resolución ────────────────────────────────────
+  if(/8k|7680x4320/.test(d))                             a.resolucion='8K';
+  else if(/4k|uhd|3840x2160/.test(d))                    a.resolucion='4K UHD';
+  else if(/2k|qhd|2560x1440/.test(d))                    a.resolucion='2K QHD';
+  else if(/1080|full.?hd|fhd|1920x1080/.test(d))         a.resolucion='Full HD';
+  else if(/720|hd\s|1366x768|1280x720/.test(d))         a.resolucion='HD';
+
+  // ── Procesador ────────────────────────────────────
+  if(/core.?i9|i9[- ]/.test(d))                          a.procesador='Intel Core i9';
+  else if(/core.?i7|i7[- ]/.test(d))                     a.procesador='Intel Core i7';
+  else if(/core.?i5|i5[- ]/.test(d))                     a.procesador='Intel Core i5';
+  else if(/core.?i3|i3[- ]/.test(d))                     a.procesador='Intel Core i3';
+  else if(/core.?i?\d/.test(d)&&/intel/.test(d))        a.procesador='Intel Core';
+  else if(/ryzen\s*9/.test(d))                           a.procesador='AMD Ryzen 9';
+  else if(/ryzen\s*7/.test(d))                           a.procesador='AMD Ryzen 7';
+  else if(/ryzen\s*5/.test(d))                           a.procesador='AMD Ryzen 5';
+  else if(/ryzen\s*3/.test(d))                           a.procesador='AMD Ryzen 3';
+  else if(/\bm4\b/.test(d)&&/apple|mac/.test(d+m))     a.procesador='Apple M4';
+  else if(/\bm3\b/.test(d)&&/apple|mac/.test(d+m))     a.procesador='Apple M3';
+  else if(/\bm2\b/.test(d)&&/apple|mac/.test(d+m))     a.procesador='Apple M2';
+  else if(/\bm1\b/.test(d)&&/apple|mac/.test(d+m))     a.procesador='Apple M1';
+  else if(/qualcomm|snapdragon/.test(d))                  a.procesador='Qualcomm Snapdragon';
+  else if(/mediatek|dimensity/.test(d))                   a.procesador='MediaTek';
+  else if(/celeron/.test(d))                              a.procesador='Intel Celeron';
+  else if(/pentium/.test(d))                              a.procesador='Intel Pentium';
+  else if(/j6412|j4125|j4105/.test(d))                   a.procesador='Intel Jasper Lake';
+  else if(/n100|n200|n300/.test(d))                       a.procesador='Intel N-Series';
+
+  // ── Sistema operativo ─────────────────────────────
+  if(/windows\s*11/.test(d))                             a.so='Windows 11';
+  else if(/windows\s*10/.test(d))                        a.so='Windows 10';
+  else if(/windows\s*server/.test(d))                    a.so='Windows Server';
+  else if(/macos|mac\s*os/.test(d))                      a.so='macOS';
+  else if(/android/.test(d)&&!/tv/.test(t))               a.so='Android';
+  else if(/ios/.test(d))                                  a.so='iOS';
+  else if(/chrome\s*os/.test(d))                         a.so='Chrome OS';
+  else if(/sin\s*s(?:istema\s*o|o\b)|sin\s*os/.test(d)) a.so='Sin SO';
+
+  // ── Conectividad móvil ────────────────────────────
+  if(/\b5g\b/.test(d))          a.red='5G';
+  else if(/\b4g\b|lte/.test(d)) a.red='4G';
+  else if(/\b3g\b/.test(d))     a.red='3G';
+
+  // ── WiFi ─────────────────────────────────────────
+  if(/wi.?fi\s*7|wifi\s*7|802\.11be/.test(d))        a.wifi='WiFi 7';
+  else if(/wi.?fi\s*6e|wifi\s*6e/.test(d))            a.wifi='WiFi 6E';
+  else if(/wi.?fi\s*6|wifi\s*6|802\.11ax/.test(d))   a.wifi='WiFi 6';
+  else if(/wi.?fi\s*5|wifi\s*5|802\.11ac/.test(d))   a.wifi='WiFi 5 (ac)';
+  else if(/wi.?fi|wireless|inalambric/.test(d))          a.wifi='WiFi';
+
+  // ── Color (tóner/tinta) ───────────────────────────
+  if(/toner|tinta|cinta|cartucho|ribbon/.test(t)){
+    if(/\bnegr|\bblack|\bbk\b/.test(d))              a.colorToner='Negro';
+    else if(/cian|cyan|\bcy\b/.test(d))                a.colorToner='Cian';
+    else if(/magenta|\bmg\b/.test(d))                  a.colorToner='Magenta';
+    else if(/amarill|yellow|\byl\b/.test(d))           a.colorToner='Amarillo';
+    else if(/tricolor|color\s+cian|pack\s+color/.test(d)) a.colorToner='Pack Color';
+    else if(/color/.test(d))                             a.colorToner='Color';
+
+    let pg=d.match(/(\d+(?:\.\d+)?)\s*(?:k\s+)?p(?:ag|\.|á)g?(?:inas?)?/);
+    if(pg){
+      let n=parseFloat(pg[1].replace(',','.'))*(/k\s/.test(pg[0])?1000:1);
+      if(n<500)          a.paginas='< 500';
+      else if(n<1500)    a.paginas='500–1.500';
+      else if(n<5000)    a.paginas='1.500–5.000';
+      else if(n<15000)   a.paginas='5.000–15.000';
+      else               a.paginas='> 15.000';
+    }
+  }
+
+  // ── Hz (monitores/TV) ─────────────────────────────
+  let hz=d.match(/(\d+)\s*hz/);
+  if(hz){
+    const v=parseInt(hz[1]);
+    if(v>=240)      a.frecuencia='240Hz+';
+    else if(v>=165) a.frecuencia='165Hz';
+    else if(v>=144) a.frecuencia='144Hz';
+    else if(v>=120) a.frecuencia='120Hz';
+    else if(v>=100) a.frecuencia='100Hz';
+    else if(v>=75)  a.frecuencia='75Hz';
+    else            a.frecuencia='60Hz';
+  }
+
+  // ── Panel (monitor) ───────────────────────────────
+  if(/\boled\b/.test(d))      a.panel='OLED';
+  else if(/\bqled\b/.test(d)) a.panel='QLED';
+  else if(/\bips\b/.test(d))  a.panel='IPS';
+  else if(/\bva\b/.test(d))   a.panel='VA';
+  else if(/\btn\b/.test(d))   a.panel='TN';
+
+  // ── Tipo impresora ────────────────────────────────
+  if(/laser/.test(d)||/laser/.test(t))              a.tipoImpresora='Láser';
+  else if(/tinta|inkjet|inyecci/.test(d))           a.tipoImpresora='Inyección de tinta';
+  else if(/term|direct|label/.test(d))              a.tipoImpresora='Térmica';
+  else if(/sublim/.test(d))                         a.tipoImpresora='Sublimación';
+  else if(/multif/.test(t))                         a.tipoImpresora='Inyección de tinta';
+
+  // ── Función impresora ─────────────────────────────
+  if(/multif/.test(t)||/multif/.test(d))            a.funcion='Multifunción';
+  else if(/plotter/.test(t))                        a.funcion='Plóter';
+  else if(/impresora/.test(t)||/impresora/.test(d)) a.funcion='Impresora';
+
+  // ── Conectividad impresora ────────────────────────
+  {
+    const conn=[];
+    if(/ethernet|red\s+cab|rj.?45/.test(d)) conn.push('Ethernet');
+    if(/wifi|wi.?fi/.test(d))               conn.push('WiFi');
+    if(/bluetooth/.test(d))                 conn.push('Bluetooth');
+    if(/usb/.test(d))                       conn.push('USB');
+    if(conn.length) a.conectividad=conn.join('+');
+  }
+
+  // ── Interfaz almacenamiento ───────────────────────
+  if(/nvme|pcie|m\.?2/.test(d))                       a.interfaz='NVMe / M.2';
+  else if(/\b2\.5[''"]?\s*sata|sata.*2\.5/.test(d)) a.interfaz='2.5" SATA';
+  else if(/\b3\.5[''"]?\s*sata|sata.*3\.5/.test(d)) a.interfaz='3.5" SATA';
+  else if(/sata/.test(d))                               a.interfaz='SATA';
+  else if(/usb\s*3/.test(d)&&/disco|ssd|hdd/.test(d)) a.interfaz='USB 3.0';
+  else if(/usb/.test(d)&&/disco|ssd|hdd/.test(d))      a.interfaz='USB';
+
+  // ── Tipo cable ────────────────────────────────────
+  if(t==='cable'||t==='adaptador'){
+    if(/hdmi/.test(d))                     a.tipoCable='HDMI';
+    else if(/displayport|dp/.test(d))      a.tipoCable='DisplayPort';
+    else if(/usb.?c|type.?c/.test(d))      a.tipoCable='USB-C';
+    else if(/usb\s*3/.test(d))            a.tipoCable='USB 3.0';
+    else if(/usb/.test(d))                 a.tipoCable='USB';
+    else if(/vga/.test(d))                 a.tipoCable='VGA';
+    else if(/jack|audio|aux/.test(d))      a.tipoCable='Audio';
+    else if(/ethernet|rj.?45|cat\s*\d/.test(d)) a.tipoCable='Red/Ethernet';
+    else if(/dvi/.test(d))                 a.tipoCable='DVI';
+
+    let ln=d.match(/(\d+(?:[.,]\d+)?)\s*metros?/);
+    if(ln){
+      const v=parseFloat(ln[1].replace(',','.'));
+      if(v<=0.5)       a.longitud='≤ 0.5m';
+      else if(v<=1)    a.longitud='1m';
+      else if(v<=2)    a.longitud='2m';
+      else if(v<=3)    a.longitud='3m';
+      else if(v<=5)    a.longitud='5m';
+      else if(v<=10)   a.longitud='10m';
+      else             a.longitud='>10m';
+    }
+  }
+
+  // ── Velocidad red ─────────────────────────────────
+  if(/\b10gbe|10\s*gbps|10000/.test(d))   a.velocidadRed='10 Gbps';
+  else if(/2\.5\s*g|2500/.test(d))        a.velocidadRed='2.5 Gbps';
+  else if(/\bgb|1000\s*mb|gigabit/.test(d)&&/switch|router|red|nic/.test(t+d))
+                                            a.velocidadRed='1 Gbps';
+  else if(/100\s*mb|fast\s*eth/.test(d))  a.velocidadRed='100 Mbps';
+
+  // ── Tipo red ──────────────────────────────────────
+  if(/\bswitch\b/.test(t+d))              a.tipoRed='Switch';
+  else if(/router/.test(t+d))              a.tipoRed='Router';
+  else if(/access\s*point|punto\s*de\s*acceso|ap\b/.test(d)) a.tipoRed='Punto de acceso';
+  else if(/tarjeta.*red|nic|pcie.*eth/.test(d)) a.tipoRed='Tarjeta de red';
+  else if(/powerline|plc/.test(d))         a.tipoRed='PLC / Powerline';
+
+  // ── Potencia SAI ──────────────────────────────────
+  let va=d.match(/(\d+)\s*va/);
+  if(va){
+    const v=parseInt(va[1]);
+    if(v<=600)       a.potencia='≤ 600VA';
+    else if(v<=1000) a.potencia='601–1.000VA';
+    else if(v<=2000) a.potencia='1.001–2.000VA';
+    else             a.potencia='> 2.000VA';
+  }
+
+  // ── Tipo periférico ───────────────────────────────
+  if(/teclado/.test(t+d))           a.tipoPer='Teclado';
+  else if(/raton|mouse/.test(t+d))  a.tipoPer='Ratón';
+  else if(/auricular|headset/.test(t+d)) a.tipoPer='Auriculares';
+  else if(/webcam|camara web/.test(t+d)) a.tipoPer='Webcam';
+  else if(/destructor|destructora/.test(t+d)) a.tipoPer='Destructora';
+  else if(/etiquetadora/.test(t))   a.tipoPer='Etiquetadora';
+
+  // ── Conexión periférico ───────────────────────────
+  if(/bluetooth/.test(d))             a.conexionPer='Bluetooth';
+  else if(/inalambric|wireless|rf\s*2/.test(d)) a.conexionPer='Inalámbrico';
+  else if(/usb/.test(d))              a.conexionPer='USB';
+  else if(/ps.?2/.test(d))            a.conexionPer='PS/2';
+
+  return a;
+}
+
+// ════════════════════════════════════════════════════
+//  FILTERS CONFIG  — qué filtros mostrar por categoría
+//  key: atributo del objeto _attrs
+//  label: texto visible
+//  order (opcional): función para ordenar los valores
+// ════════════════════════════════════════════════════
+const numOrder = (a,b) => parseFloat(a)||0 - (parseFloat(b)||0);
+
+const FILTERS_CFG = {
+  'Zona Apple': [
+    {key:'almacenamiento', label:'Almacenamiento'},
+    {key:'procesador',     label:'Chip'},
+    {key:'so',             label:'Sistema Operativo'},
+  ],
+  'Portátiles': [
+    {key:'_marca',         label:'Marca'},
+    {key:'procesador',     label:'Procesador'},
+    {key:'ram',            label:'RAM'},
+    {key:'almacenamiento', label:'Almacenamiento'},
+    {key:'pantalla',       label:'Tamaño pantalla'},
+    {key:'so',             label:'Sistema Operativo'},
+  ],
+  'Ordenadores': [
+    {key:'_marca',         label:'Marca'},
+    {key:'procesador',     label:'Procesador'},
+    {key:'ram',            label:'RAM'},
+    {key:'almacenamiento', label:'Almacenamiento'},
+    {key:'so',             label:'Sistema Operativo'},
+  ],
+  'Smartphones y Tablets': [
+    {key:'_marca',         label:'Marca'},
+    {key:'red',            label:'Red móvil'},
+    {key:'ram',            label:'RAM'},
+    {key:'almacenamiento', label:'Almacenamiento'},
+    {key:'pantalla',       label:'Tamaño pantalla'},
+    {key:'so',             label:'Sistema Operativo'},
+    {key:'wifi',           label:'WiFi'},
+  ],
+  'Monitores': [
+    {key:'_marca',         label:'Marca'},
+    {key:'pantalla',       label:'Tamaño'},
+    {key:'resolucion',     label:'Resolución'},
+    {key:'panel',          label:'Tipo de panel'},
+    {key:'frecuencia',     label:'Frecuencia'},
+    {key:'conectividad',   label:'Conectividad'},
+  ],
+  'Televisores': [
+    {key:'_marca',         label:'Marca'},
+    {key:'pantalla',       label:'Tamaño'},
+    {key:'resolucion',     label:'Resolución'},
+    {key:'frecuencia',     label:'Frecuencia'},
+    {key:'so',             label:'Sistema Smart TV'},
+  ],
+  'Impresoras': [
+    {key:'_marca',         label:'Marca'},
+    {key:'funcion',        label:'Función'},
+    {key:'tipoImpresora',  label:'Tecnología'},
+    {key:'conectividad',   label:'Conectividad'},
+  ],
+  'Almacenamiento': [
+    {key:'_marca',         label:'Marca'},
+    {key:'almacenamiento', label:'Capacidad'},
+    {key:'interfaz',       label:'Interfaz'},
+  ],
+  'Componentes': [
+    {key:'_marca',         label:'Marca'},
+    {key:'ram',            label:'Capacidad RAM'},
+    {key:'procesador',     label:'Procesador'},
+  ],
+  'Redes': [
+    {key:'_marca',         label:'Marca'},
+    {key:'tipoRed',        label:'Tipo'},
+    {key:'velocidadRed',   label:'Velocidad'},
+    {key:'wifi',           label:'WiFi'},
+  ],
+  'Periféricos': [
+    {key:'_marca',         label:'Marca'},
+    {key:'tipoPer',        label:'Tipo'},
+    {key:'conexionPer',    label:'Conexión'},
+  ],
+  'TPV': [
+    {key:'_marca',         label:'Marca'},
+    {key:'pantalla',       label:'Tamaño pantalla'},
+    {key:'procesador',     label:'Procesador'},
+    {key:'ram',            label:'RAM'},
+    {key:'almacenamiento', label:'Almacenamiento'},
+    {key:'so',             label:'Sistema Operativo'},
+  ],
+  'SAI / UPS': [
+    {key:'_marca',         label:'Marca'},
+    {key:'potencia',       label:'Potencia'},
+  ],
+  'Cables y Adaptadores': [
+    {key:'_marca',         label:'Marca'},
+    {key:'tipoCable',      label:'Tipo'},
+    {key:'longitud',       label:'Longitud'},
+  ],
+  'Papelería y Oficina': [
+    {key:'_marca',         label:'Marca'},
+  ],
+  'Accesorios': [
+    {key:'_marca',         label:'Marca'},
+  ],
+};
+
+// Añadir filtros de consumibles a subcategorías de Impresoras
+const FILTERS_SUB = {
+  'Tóner':          [{key:'_marca',label:'Marca compatible'},{key:'colorToner',label:'Color'},{key:'paginas',label:'Páginas aprox.'}],
+  'Tinta / Cartuchos':[{key:'_marca',label:'Marca compatible'},{key:'colorToner',label:'Color'},{key:'paginas',label:'Páginas aprox.'}],
+  'Cintas':         [{key:'_marca',label:'Marca compatible'},{key:'colorToner',label:'Color'}],
+  'Consumibles':    [{key:'_marca',label:'Marca compatible'},{key:'colorToner',label:'Color'}],
+};
+
+// ════════════════════════════════════════════════════
+//  FILTER STATE
+// ════════════════════════════════════════════════════
+let activeFilters = {};   // { filterKey: Set of selected values }
+
+function getFilterCfg(){
+  if(sSub && FILTERS_SUB[sSub]) return FILTERS_SUB[sSub];
+  return FILTERS_CFG[sCat] || [];
+}
+
+function getAttrVal(p, key){
+  if(key==='_marca') return (p.marca||'').trim() || null;
+  return p._attrs[key] || null;
+}
+
+// ════════════════════════════════════════════════════
+//  BUILD FILTER PANEL
+// ════════════════════════════════════════════════════
+function buildFilters(baseProducts){
+  const panel = document.getElementById('fltPanel');
+  const body  = document.getElementById('fltBody');
+  const cfg   = getFilterCfg();
+
+  if(!cfg.length || !sCat){ panel.style.display='none'; return; }
+  panel.style.display='block';
+
+  // Count available values in base product set
+  const valueCounts = {};
+  cfg.forEach(f => {
+    valueCounts[f.key] = {};
+    baseProducts.forEach(p => {
+      const v = getAttrVal(p, f.key);
+      if(v) valueCounts[f.key][v] = (valueCounts[f.key][v]||0)+1;
+    });
+  });
+
+  // Build HTML
+  let html = '';
+  cfg.forEach(f => {
+    const counts = valueCounts[f.key];
+    const vals = Object.keys(counts).sort((a,b)=>{
+      // Numeric sort for sizes, alphabetic otherwise
+      const na=parseFloat(a), nb=parseFloat(b);
+      if(!isNaN(na)&&!isNaN(nb)) return na-nb;
+      return a.localeCompare(b,'es');
+    });
+    if(!vals.length) return;
+
+    const sel = activeFilters[f.key]||new Set();
+    const open = sel.size > 0;
+    html += `<div class="flt-group">
+      <button class="flt-group-btn${open?' open':''}" data-fkey="${esc(f.key)}">
+        <span>${esc(f.label)}</span>
+        <span class="fchev">›</span>
+      </button>
+      <div class="flt-items${open?' show':''}">`;
+    vals.forEach(v => {
+      const checked = sel.has(v) ? 'checked' : '';
+      const active  = sel.has(v) ? ' active' : '';
+      html += `<label class="flt-item${active}">
+        <input type="checkbox" data-fkey="${esc(f.key)}" data-fval="${esc(v)}" ${checked}>
+        <span>${esc(v)}</span>
+        <span class="flt-cnt">${counts[v]}</span>
+      </label>`;
+    });
+    html += `</div></div>`;
+  });
+  body.innerHTML = html;
+
+  // Show/hide clear button
+  const hasActive = Object.values(activeFilters).some(s=>s.size>0);
+  const clrBtn = document.getElementById('fltClear');
+  clrBtn.classList.toggle('show', hasActive);
+}
+
+// ── Event: toggle filter group open/close ──────────
+document.getElementById('fltBody').addEventListener('click', e=>{
+  const gbtn = e.target.closest('.flt-group-btn');
+  if(gbtn){
+    gbtn.classList.toggle('open');
+    gbtn.nextElementSibling.classList.toggle('show');
+    return;
+  }
+});
+
+// ── Event: checkbox change ─────────────────────────
+document.getElementById('fltBody').addEventListener('change', e=>{
+  const cb = e.target.closest('input[type=checkbox]');
+  if(!cb) return;
+  const key = cb.dataset.fkey;
+  const val = cb.dataset.fval;
+  if(!activeFilters[key]) activeFilters[key] = new Set();
+  if(cb.checked) activeFilters[key].add(val);
+  else           activeFilters[key].delete(val);
+  if(!activeFilters[key].size) delete activeFilters[key];
+  curPage=1; applyF();
+});
+
+// ── Clear all filters ──────────────────────────────
+document.getElementById('fltClear').addEventListener('click', ()=>{
+  activeFilters={};
+  curPage=1; applyF();
+});
+
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
 
 // ════════════════════════════════════════════════════
 //  IMAGE HELPER
@@ -544,7 +1032,9 @@ function processCSV(txt){
     const ap=(r.marca||'').toLowerCase().trim()==='apple'||cat.c==='Zona Apple';
     const p={...r,_cat:cat.c,_sub:cat.s,_ico:cat.i,_ap:ap,
              _stk:parseInt(r.stock)||0,_via:parseInt(r.viajando)||0};
-    p._pr=calcPrice(p); return p;
+    p._pr=calcPrice(p);
+    p._attrs=extractAttrs(p);   // ← extract filter attributes
+    return p;
   }).filter(r=>r.codigo&&r.denominacion);
 
   CC={};
@@ -610,11 +1100,17 @@ document.getElementById('catTree').addEventListener('click', e=>{
 // ════════════════════════════════════════════════════
 //  FILTER + SORT + RENDER
 // ════════════════════════════════════════════════════
-function pick(cat, sub){ sCat=cat||null; sSub=sub||null; curPage=1; buildTree(); applyF(); toTop(); }
+function pick(cat, sub){ sCat=cat||null; sSub=sub||null; activeFilters={}; curPage=1; buildTree(); applyF(); toTop(); }
 
 document.getElementById('srch').addEventListener('input', ()=>{
-  srchQ=document.getElementById('srch').value.trim();
-  curPage=1; applyF();
+  const prev = srchQ;
+  srchQ = document.getElementById('srch').value.trim();
+  if(srchQ && srchQ !== prev){
+    sCat = null; sSub = null; activeFilters = {};
+    buildTree();
+  }
+  curPage = 1;
+  applyF();
 });
 document.getElementById('srt').addEventListener('change', applyF);
 
@@ -623,19 +1119,28 @@ function applyF(){
   if(sCat) f=f.filter(p=>p._cat===sCat);
   if(sSub) f=f.filter(p=>p._sub===sSub);
 
-  const isSearch = srchQ.trim().length > 0;
+  // ── Build filter panel with unfiltered base set ──
+  buildFilters(f);
 
+  // ── Apply active attribute filters ───────────────
+  Object.entries(activeFilters).forEach(([key,vals])=>{
+    if(!vals.size) return;
+    f=f.filter(p=>{
+      const v=getAttrVal(p,key);
+      return v && vals.has(v);
+    });
+  });
+
+  // ── Search / sort ─────────────────────────────────
+  const isSearch = srchQ.trim().length > 0;
   if(isSearch){
     const terms = parseQuery(srchQ);
-    // Calcular score de cada producto; excluir score 0 (ninguna coincidencia)
     const scored = f
       .map(p => ({ p, score: scoreSearch(p, terms) }))
       .filter(x => x.score > 0);
-    // Ordenar por relevancia descendente
     scored.sort((a,b) => b.score - a.score);
     f = scored.map(x => x.p);
   } else {
-    // Sin búsqueda: aplicar orden del selector
     const s = document.getElementById('srt').value;
     if(s==='name')            f.sort((a,b)=>(a.denominacion||'').localeCompare(b.denominacion||''));
     else if(s==='price-asc')  f.sort((a,b)=>a._pr-b._pr);
