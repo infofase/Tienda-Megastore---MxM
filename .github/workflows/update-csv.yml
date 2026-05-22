@@ -1,0 +1,40 @@
+name: Actualizar CSV de productos
+
+on:
+  schedule:
+    # Cada 90 minutos (GitHub Actions usa cron, mínimo cada 5 min)
+    - cron: '0 * * * *'    # cada hora en punto
+    - cron: '30 * * * *'   # cada hora y media -> resultado: cada ~30 min aprox
+  workflow_dispatch:        # permite lanzarlo manualmente desde GitHub
+
+jobs:
+  download-csv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # necesario para hacer commit
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Descargar CSV desde infofase.com
+        run: |
+          curl -fsSL \
+            -H "User-Agent: Mozilla/5.0 (compatible; InfofaseTienda/1.0)" \
+            "https://infofase.com/tienda/megastore.csv" \
+            -o megastore.csv
+          echo "Tamaño del CSV: $(wc -l < megastore.csv) líneas"
+
+      - name: Hacer commit si hay cambios
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add megastore.csv
+          # Solo hace commit si el CSV cambió
+          if git diff --staged --quiet; then
+            echo "El CSV no ha cambiado, no se hace commit."
+          else
+            git commit -m "⬆️ CSV actualizado: $(date '+%Y-%m-%d %H:%M UTC')"
+            git push
+            echo "CSV actualizado y subido."
+          fi
